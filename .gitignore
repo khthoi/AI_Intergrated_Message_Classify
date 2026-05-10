@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+backend/node_modules/
+
+# Build output
+backend/dist/
+
+# Environment variables (contains API keys — never commit)
+backend/.env
+.env
+
+# Generated reports
+backend/reports/
+
+# Claude internal memory
+.claude/
+
+# Misc
+text.txt
