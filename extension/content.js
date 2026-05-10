@@ -160,7 +160,19 @@
   // ── Lưu danh sách records vào storage (upsert theo conversationId) ────────
   function saveRecords(records) {
     return new Promise((resolve) => {
+      // Timeout 8s — tránh treo vĩnh viễn khi extension context bị invalidate
+      const guard = setTimeout(() => {
+        console.warn('[AutoMSTool] saveRecords: timeout 8s, bỏ qua và tiếp tục');
+        resolve();
+      }, 8000);
+
       chrome.storage.local.get(['scanResults'], (s) => {
+        if (chrome.runtime.lastError) {
+          clearTimeout(guard);
+          console.warn('[AutoMSTool] saveRecords get error:', chrome.runtime.lastError.message);
+          resolve();
+          return;
+        }
         const existing = s.scanResults ?? [];
         for (const record of records) {
           const idx = existing.findIndex((r) => r.conversationId === record.conversationId);
@@ -171,7 +183,13 @@
           scanResults: existing,
           lastSync: new Date().toISOString(),
           lastConversation: records[records.length - 1]?.participantName ?? '',
-        }, resolve);
+        }, () => {
+          clearTimeout(guard);
+          if (chrome.runtime.lastError) {
+            console.warn('[AutoMSTool] saveRecords set error:', chrome.runtime.lastError.message);
+          }
+          resolve();
+        });
       });
     });
   }
@@ -363,42 +381,51 @@
         continue;
       }
 
-      await navigateTo(convId, element);
-      const loaded = await waitForMessages(1, 10000);
+      try {
+        console.log(`[AutoMSTool] [Phase 2] [${i + 1}/${allConversations.length}] ${convId}: bắt đầu navigate...`);
+        await navigateTo(convId, element);
+        console.log(`[AutoMSTool] [Phase 2] [${i + 1}] URL ok, chờ DOM...`);
 
-      if (!loaded) {
-        console.warn(`[AutoMSTool] [Phase 2] [${i + 1}] ${convId}: timeout chờ DOM, bỏ qua`);
-        continue;
-      }
-
-      // Xác nhận lại bằng timestamp thực từ DOM
-      const lastMsgTime = getLastMessageTime();
-      if (lastMsgTime && lastMsgTime < cutoff) {
-        skippedOld++;
-        console.log(`[AutoMSTool] [Phase 2] [${i + 1}/${allConversations.length}] SKIP (DOM) — tin cuối ${lastMsgTime.toLocaleDateString('vi-VN')} cũ hơn cutoff`);
-        if (skippedOld >= 5) {
-          console.log('[AutoMSTool] [Phase 2] 5 conv liên tiếp cũ hơn cutoff → dừng sớm');
-          break;
+        const loaded = await waitForMessages(5, 10000);
+        if (!loaded) {
+          console.warn(`[AutoMSTool] [Phase 2] [${i + 1}] ${convId}: timeout chờ DOM, bỏ qua`);
+          continue;
         }
-        continue;
+
+        // Chờ thêm để Messenger render đủ tin nhắn (lazy-load)
+        await sleep(600);
+
+        // Xác nhận lại bằng timestamp thực từ DOM
+        const lastMsgTime = getLastMessageTime();
+        if (lastMsgTime && lastMsgTime < cutoff) {
+          skippedOld++;
+          console.log(`[AutoMSTool] [Phase 2] [${i + 1}/${allConversations.length}] SKIP (DOM) — tin cuối ${lastMsgTime.toLocaleDateString('vi-VN')} cũ hơn cutoff`);
+          if (skippedOld >= 5) {
+            console.log('[AutoMSTool] [Phase 2] 5 conv liên tiếp cũ hơn cutoff → dừng sớm');
+            break;
+          }
+          continue;
+        }
+        skippedOld = 0;
+
+        const messages = extractMessages();
+        const name = getParticipantName();
+
+        if (!messages.length) {
+          skippedEmpty++;
+          console.log(`[AutoMSTool] [Phase 2] [${i + 1}/${allConversations.length}] ${name}: không có tin nhắn, bỏ qua`);
+          continue;
+        }
+
+        convBuffer.push({ conversationId: convId, participantName: name, messages });
+        console.log(`[AutoMSTool] [Phase 2] [${i + 1}/${allConversations.length}] ${name}: buffered (${convBuffer.length}/${batchSize})`);
+
+        if (convBuffer.length >= batchSize) await flushBuffer();
+
+        await sleep(1200);
+      } catch (err) {
+        console.error(`[AutoMSTool] [Phase 2] [${i + 1}] Lỗi bất ngờ: ${err?.message ?? err} — bỏ qua conv này`);
       }
-      skippedOld = 0;
-
-      const messages = extractMessages();
-      const name = getParticipantName();
-
-      if (!messages.length) {
-        skippedEmpty++;
-        console.log(`[AutoMSTool] [Phase 2] [${i + 1}/${allConversations.length}] ${name}: không có tin nhắn, bỏ qua`);
-        continue;
-      }
-
-      convBuffer.push({ conversationId: convId, participantName: name, messages });
-      console.log(`[AutoMSTool] [Phase 2] [${i + 1}/${allConversations.length}] ${name}: buffered (${convBuffer.length}/${batchSize})`);
-
-      if (convBuffer.length >= batchSize) await flushBuffer();
-
-      await sleep(800);
     }
 
     // Flush phần còn lại
